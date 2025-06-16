@@ -93,14 +93,22 @@ int main() {
                      current_media.filename().string().c_str(),
                      is_paused ? "paused" : "playing");
         }
-
+        if (scroll_offset > std::max(0, (int)entries.size() - MAX_VIEW)) {
+            scroll_offset = std::max(0, (int)entries.size() - MAX_VIEW);
+        }
+        int visible_count = std::min<int>(MAX_VIEW, entries.size());
         int list_start = scroll_offset;
-        int list_end = std::min<int>(scroll_offset + MAX_VIEW, entries.size());
+        int list_end = std::min<int>(scroll_offset + visible_count, entries.size());
+
+        bool show_scroll_up = scroll_offset > 0;
+        bool show_scroll_down = (entries.size() > MAX_VIEW) && (scroll_offset + visible_count < entries.size());
+
         int base_row = 2;
 
-        if (scroll_offset > 0) {
+        if (show_scroll_up) {
             mvprintw(base_row - 1, 0, "More above");
         }
+
         for (int i = list_start; i < list_end; ++i) {
             int screen_row = i - scroll_offset + base_row;
             if (i == selected) {
@@ -111,7 +119,8 @@ int main() {
                 mvprintw(screen_row, 0, "%s", entries[i].c_str());
             }
         }
-        if (scroll_offset + MAX_VIEW < entries.size()) {
+
+        if (show_scroll_down) {
             mvprintw(list_end - scroll_offset + base_row, 0, "More below");
         }
 
