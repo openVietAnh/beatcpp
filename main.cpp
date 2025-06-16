@@ -8,13 +8,65 @@
 #include <sys/types.h>
 #include <signal.h>
 #include <algorithm>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 
 const int MAX_VIEW = 10;
 pid_t media_pid = -1;
 bool is_paused = false;
 fs::path current_media;
+
+bool wait_for_socket(const std::string& socket_path, int timeout_ms = 1000) {
+    int waited = 0;
+    while (waited < timeout_ms) {
+        if (fs::exists(socket_path)) {
+            return true;
+        }
+        usleep(100 * 1000);
+        waited += 100;
+    }
+    return false;
+}
+
+std::optional<float> get_playback_position(const std::string& socket_path, const std::string& property) {
+    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd == -1) return std::nullopt;
+
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+        close(fd);
+        return std::nullopt;
+    }
+
+    json request = {
+        {"command", {"get_property", property}}
+    };
+
+    std::string payload = request.dump() + "\n";
+    send(fd, payload.c_str(), payload.size(), 0);
+
+    char buffer[512] = {};
+    int len = recv(fd, buffer, sizeof(buffer), 0);
+    close(fd);
+
+    if (len <= 0) return std::nullopt;
+
+    try {
+        auto response = json::parse(buffer);
+        if (response.contains("error") && response["error"] == "success" && response.contains("data")) {
+            return response["data"].get<float>();
+        }
+    } catch (...) {}
+
+    return std::nullopt;
+}
 
 void list_directory(const fs::path &path, std::vector<std::string> &entries, std::vector<fs::path> &paths) {
     entries.clear();
@@ -44,28 +96,28 @@ void stop_media() {
         media_pid = -1;
         is_paused = false;
         current_media.clear();
+        fs::remove("/tmp/mpv-socket"); // Clean up stale socket
     }
 }
 
 void play_media(const fs::path &path) {
-    stop_media();
-
+    std::string socket_path = "/tmp/mpv-socket";
     media_pid = fork();
     if (media_pid == 0) {
-        int devnull = open("/dev/null", O_RDWR);
-        if (devnull != -1) {
-            dup2(devnull, STDIN_FILENO);
-            dup2(devnull, STDOUT_FILENO);
-            dup2(devnull, STDERR_FILENO);
-            if (devnull > 2) close(devnull);
-        }
+        fclose(stdin);
+        fclose(stdout);
+        fclose(stderr);
 
-        execlp("mpv", "mpv", "--quiet", "--audio-display=no", "--terminal=no", path.c_str(), NULL);
+        execlp("mpv", "mpv",
+               "--quiet",
+               "--audio-display=no",
+               "--terminal=no",
+               "--input-ipc-server=/tmp/mpv-socket",
+               path.c_str(),
+               NULL);
         _exit(1);
     }
-
-    current_media = path;
-    is_paused = false;
+    wait_for_socket(socket_path);
 }
 
 int main() {
@@ -87,12 +139,32 @@ int main() {
     while (true) {
         clear();
         mvprintw(0, 0, "Directory: %s", current_path.c_str());
-
         if (media_pid > 0) {
-            mvprintw(1, 0, "Now playing: %s [%s] (p: pause/resume, s: stop)",
-                     current_media.filename().string().c_str(),
-                     is_paused ? "paused" : "playing");
+            auto position = get_playback_position("/tmp/mpv-socket", "time-pos");
+            auto duration = get_playback_position("/tmp/mpv-socket", "duration");
+
+            if (position && duration && *duration > 0.0f) {
+                int bar_width = 50;
+                float ratio = *position / *duration;
+                int filled = static_cast<int>(ratio * bar_width);
+
+                std::string bar = "[" + std::string(filled, '#') + std::string(bar_width - filled, '-') + "]";
+
+                // Format time as mm:ss
+                int pos_sec = static_cast<int>(*position);
+                int dur_sec = static_cast<int>(*duration);
+
+                char time_buf[32];
+                std::snprintf(time_buf, sizeof(time_buf), "%02d:%02d / %02d:%02d",
+                              pos_sec / 60, pos_sec % 60, dur_sec / 60, dur_sec % 60);
+
+                mvprintw(1, 0, "Now playing: %s", current_media.filename().string().c_str());
+                mvprintw(2, 0, "%s %s", bar.c_str(), time_buf);
+            } else {
+                mvprintw(1, 0, "Now playing: %s (loading...)", current_media.filename().string().c_str());
+            }
         }
+
         if (scroll_offset > std::max(0, (int)entries.size() - MAX_VIEW)) {
             scroll_offset = std::max(0, (int)entries.size() - MAX_VIEW);
         }
