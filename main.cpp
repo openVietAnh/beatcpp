@@ -11,11 +11,12 @@
 
 namespace fs = std::filesystem;
 
+const int MAX_VIEW = 10;
 pid_t media_pid = -1;
 bool is_paused = false;
 fs::path current_media;
 
-void list_directory(const fs::path& path, std::vector<std::string>& entries, std::vector<fs::path>& paths) {
+void list_directory(const fs::path &path, std::vector<std::string> &entries, std::vector<fs::path> &paths) {
     entries.clear();
     paths.clear();
 
@@ -25,13 +26,13 @@ void list_directory(const fs::path& path, std::vector<std::string>& entries, std
     entries.push_back("[Quit]");
     paths.push_back("");
 
-    for (const auto& entry : fs::directory_iterator(path)) {
+    for (const auto &entry: fs::directory_iterator(path)) {
         entries.push_back(entry.path().filename().string());
         paths.push_back(entry.path());
     }
 }
 
-bool is_media_file(const fs::path& path) {
+bool is_media_file(const fs::path &path) {
     std::string ext = path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
     return ext == ".mp3" || ext == ".mp4" || ext == ".mkv" || ext == ".flac" || ext == ".wav" || ext == ".ogg";
@@ -46,8 +47,8 @@ void stop_media() {
     }
 }
 
-void play_media(const fs::path& path) {
-    stop_media(); // Stop existing
+void play_media(const fs::path &path) {
+    stop_media();
 
     media_pid = fork();
     if (media_pid == 0) {
@@ -73,6 +74,7 @@ int main() {
     cbreak();
     keypad(stdscr, TRUE);
     curs_set(0);
+    int scroll_offset = 0;
 
     fs::path current_path = fs::current_path();
     std::vector<std::string> entries;
@@ -92,28 +94,49 @@ int main() {
                      is_paused ? "paused" : "playing");
         }
 
-        for (int i = 0; i < entries.size(); ++i) {
+        int list_start = scroll_offset;
+        int list_end = std::min<int>(scroll_offset + MAX_VIEW, entries.size());
+        int base_row = 2;
+
+        if (scroll_offset > 0) {
+            mvprintw(base_row - 1, 0, "More above");
+        }
+        for (int i = list_start; i < list_end; ++i) {
+            int screen_row = i - scroll_offset + base_row;
             if (i == selected) {
                 attron(A_REVERSE);
-                mvprintw(i + 2, 0, "%s", entries[i].c_str());
+                mvprintw(screen_row, 0, "%s", entries[i].c_str());
                 attroff(A_REVERSE);
             } else {
-                mvprintw(i + 2, 0, "%s", entries[i].c_str());
+                mvprintw(screen_row, 0, "%s", entries[i].c_str());
             }
+        }
+        if (scroll_offset + MAX_VIEW < entries.size()) {
+            mvprintw(list_end - scroll_offset + base_row, 0, "More below");
         }
 
         refresh();
         ch = getch();
 
-        if (ch == KEY_UP && selected > 0) {
-            selected--;
-        } else if (ch == KEY_DOWN && selected < entries.size() - 1) {
-            selected++;
+        if (ch == KEY_UP) {
+            if (selected > 0) {
+                selected--;
+                if (selected < scroll_offset) {
+                    scroll_offset--;
+                }
+            }
+        } else if (ch == KEY_DOWN) {
+            if (selected < entries.size() - 1) {
+                selected++;
+                if (selected >= scroll_offset + MAX_VIEW) {
+                    scroll_offset++;
+                }
+            }
         } else if (ch == '\n' || ch == KEY_ENTER) {
-            const fs::path& chosen = paths[selected];
-            if (selected == 1) { // Quit
+            const fs::path &chosen = paths[selected];
+            if (selected == 1) {
                 break;
-            } else if (selected == 0) { // Back
+            } else if (selected == 0) {
                 if (current_path.has_parent_path()) {
                     current_path = current_path.parent_path();
                     list_directory(current_path, entries, paths);
