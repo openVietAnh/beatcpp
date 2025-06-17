@@ -1,4 +1,4 @@
-# 🔧 CLI Media Browser – Dependency Installation Guide
+# 🔧 Beatcpp – Dependency Installation Guide
 
 This guide helps you install all required dependencies to build and run the CLI Media Browser on **Linux** (openSUSE, Ubuntu/Debian, Arch, Fedora).
 
