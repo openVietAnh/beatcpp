@@ -1,13 +1,14 @@
-#include <iostream>
+#include <ncurses.h>
+#include <filesystem>
 #include <vector>
 #include <string>
-#include <filesystem>
-#include <ncurses.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <sys/types.h>
-#include <signal.h>
-#include <algorithm>
+#include <sys/wait.h>
+#include <csignal>
+#include <iostream>
+#include <chrono>
+#include <thread>
+#include <fstream>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <nlohmann/json.hpp>
@@ -16,23 +17,53 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 const int MAX_VIEW = 10;
-pid_t media_pid = -1;
-bool is_paused = false;
-fs::path current_media;
 
-bool wait_for_socket(const std::string& socket_path, int timeout_ms = 1000) {
-    int waited = 0;
-    while (waited < timeout_ms) {
-        if (fs::exists(socket_path)) {
-            return true;
-        }
-        usleep(100 * 1000);
-        waited += 100;
-    }
-    return false;
+bool is_media_file(const fs::path& path) {
+    return path.extension() == ".mp3";
 }
 
-std::optional<float> get_playback_position(const std::string& socket_path, const std::string& property) {
+void list_directory(const fs::path& dir, std::vector<std::string>& entries, std::vector<fs::path>& paths) {
+    entries.clear();
+    paths.clear();
+    entries.push_back("Back");
+    paths.push_back("..");
+    entries.push_back("Quit");
+    paths.push_back("");
+
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        entries.push_back(entry.path().filename().string());
+        paths.push_back(entry.path());
+    }
+}
+
+pid_t media_pid = -1;
+fs::path current_media;
+bool is_paused = false;
+
+void stop_media() {
+    if (media_pid > 0) {
+        kill(media_pid, SIGTERM);
+        waitpid(media_pid, nullptr, 0);
+        media_pid = -1;
+        current_media.clear();
+    }
+}
+
+
+void play_media(const fs::path& path) {
+    stop_media();
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("mpv", "mpv", "--no-terminal", "--input-ipc-server=/tmp/mpv-socket", path.c_str(), nullptr);
+        _exit(1);
+    } else if (pid > 0) {
+        media_pid = pid;
+        current_media = path;
+        is_paused = false;
+    }
+}
+
+std::optional<float> get_playback_property(const std::string& socket_path, const std::string& property) {
     int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd == -1) return std::nullopt;
 
@@ -68,65 +99,13 @@ std::optional<float> get_playback_position(const std::string& socket_path, const
     return std::nullopt;
 }
 
-void list_directory(const fs::path &path, std::vector<std::string> &entries, std::vector<fs::path> &paths) {
-    entries.clear();
-    paths.clear();
-
-    entries.push_back("[Back]");
-    paths.push_back(path.parent_path());
-
-    entries.push_back("[Quit]");
-    paths.push_back("");
-
-    for (const auto &entry: fs::directory_iterator(path)) {
-        entries.push_back(entry.path().filename().string());
-        paths.push_back(entry.path());
-    }
-}
-
-bool is_media_file(const fs::path &path) {
-    std::string ext = path.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    return ext == ".mp3" || ext == ".mp4" || ext == ".mkv" || ext == ".flac" || ext == ".wav" || ext == ".ogg";
-}
-
-void stop_media() {
-    if (media_pid > 0) {
-        kill(media_pid, SIGTERM);
-        media_pid = -1;
-        is_paused = false;
-        current_media.clear();
-        fs::remove("/tmp/mpv-socket"); // Clean up stale socket
-    }
-}
-
-void play_media(const fs::path &path) {
-    std::string socket_path = "/tmp/mpv-socket";
-    media_pid = fork();
-    if (media_pid == 0) {
-        fclose(stdin);
-        fclose(stdout);
-        fclose(stderr);
-
-        execlp("mpv", "mpv",
-               "--quiet",
-               "--audio-display=no",
-               "--terminal=no",
-               "--input-ipc-server=/tmp/mpv-socket",
-               path.c_str(),
-               NULL);
-        _exit(1);
-    }
-    wait_for_socket(socket_path);
-}
-
 int main() {
     initscr();
     noecho();
     cbreak();
     keypad(stdscr, TRUE);
     curs_set(0);
-    int scroll_offset = 0;
+    nodelay(stdscr, TRUE); // getch() won't block
 
     fs::path current_path = fs::current_path();
     std::vector<std::string> entries;
@@ -134,32 +113,30 @@ int main() {
     list_directory(current_path, entries, paths);
 
     int selected = 0;
-    int ch;
+    int scroll_offset = 0;
 
     while (true) {
         clear();
         mvprintw(0, 0, "Directory: %s", current_path.c_str());
+
         if (media_pid > 0) {
-            auto position = get_playback_position("/tmp/mpv-socket", "time-pos");
-            auto duration = get_playback_position("/tmp/mpv-socket", "duration");
+            auto position = get_playback_property("/tmp/mpv-socket", "time-pos");
+            auto duration = get_playback_property("/tmp/mpv-socket", "duration");
 
             if (position && duration && *duration > 0.0f) {
                 int bar_width = 50;
                 float ratio = *position / *duration;
                 int filled = static_cast<int>(ratio * bar_width);
 
-                std::string bar = "[" + std::string(filled, '#') + std::string(bar_width - filled, '-') + "]";
+                // std::string bar = "[" + std::string(filled, '#') + std::string(bar_width - filled, '-') + "]";
 
-                // Format time as mm:ss
                 int pos_sec = static_cast<int>(*position);
                 int dur_sec = static_cast<int>(*duration);
-
                 char time_buf[32];
                 std::snprintf(time_buf, sizeof(time_buf), "%02d:%02d / %02d:%02d",
                               pos_sec / 60, pos_sec % 60, dur_sec / 60, dur_sec % 60);
 
-                mvprintw(1, 0, "Now playing: %s", current_media.filename().string().c_str());
-                mvprintw(2, 0, "%s %s", bar.c_str(), time_buf);
+                mvprintw(1, 0, "Now playing: %s %s", current_media.filename().string().c_str(), time_buf);
             } else {
                 mvprintw(1, 0, "Now playing: %s (loading...)", current_media.filename().string().c_str());
             }
@@ -197,7 +174,8 @@ int main() {
         }
 
         refresh();
-        ch = getch();
+
+        int ch = getch();
 
         if (ch == KEY_UP) {
             if (selected > 0) {
@@ -207,14 +185,14 @@ int main() {
                 }
             }
         } else if (ch == KEY_DOWN) {
-            if (selected < entries.size() - 1) {
+            if (selected < (int)entries.size() - 1) {
                 selected++;
                 if (selected >= scroll_offset + MAX_VIEW) {
                     scroll_offset++;
                 }
             }
         } else if (ch == '\n' || ch == KEY_ENTER) {
-            const fs::path &chosen = paths[selected];
+            const fs::path& chosen = paths[selected];
             if (selected == 1) {
                 break;
             } else if (selected == 0) {
@@ -238,6 +216,8 @@ int main() {
         } else if (ch == 's' && media_pid > 0) {
             stop_media();
         }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     stop_media();
