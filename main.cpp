@@ -25,10 +25,10 @@ bool is_media_file(const fs::path& path) {
 void list_directory(const fs::path& dir, std::vector<std::string>& entries, std::vector<fs::path>& paths) {
     entries.clear();
     paths.clear();
-    entries.push_back("Back");
-    paths.push_back("..");
-    entries.push_back("Quit");
-    paths.push_back("");
+    entries.emplace_back("Back");
+    paths.emplace_back("..");
+    entries.emplace_back("Quit");
+    paths.emplace_back("");
 
     for (const auto& entry : fs::directory_iterator(dir)) {
         entries.push_back(entry.path().filename().string());
@@ -71,12 +71,12 @@ std::optional<float> get_playback_property(const std::string& socket_path, const
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
 
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+    if (connect(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) == -1) {
         close(fd);
         return std::nullopt;
     }
 
-    json request = {
+    const json request = {
         {"command", {"get_property", property}}
     };
 
@@ -84,7 +84,7 @@ std::optional<float> get_playback_property(const std::string& socket_path, const
     send(fd, payload.c_str(), payload.size(), 0);
 
     char buffer[512] = {};
-    int len = recv(fd, buffer, sizeof(buffer), 0);
+    const int len = recv(fd, buffer, sizeof(buffer), 0);
     close(fd);
 
     if (len <= 0) return std::nullopt;
